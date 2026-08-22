@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Improving Cache Performance Using Stride Prefetching in gem5</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Manrope', 'sans-serif'] },
+          colors: {
+            gold: { 100:'#FDEebb', 300:'#F2C94C', 400:'#FFD369', 500:'#E6B800', 600:'#B38F00' },
+            charcoal: { 800:'#1A1A1A', 900:'#0F0F0F', 950:'#050505' }
+          },
+          backgroundImage: {
+            'gold-gradient': 'linear-gradient(135deg, #F2C94C 0%, #E6B800 100%)',
+            'dark-gradient': 'linear-gradient(to bottom, #111111, #050505)',
+            'cinematic-fade': 'radial-gradient(circle at center, rgba(242,201,76,0.08) 0%, transparent 70%)'
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+  
+    html { font-size: 145%; }
+    
+    ::selection { background: rgba(242,201,76,0.2); color: #FFD369; }
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: #050505; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+    html { scroll-behavior: smooth; }
+
+    .home-btn{position:fixed;
+    bottom:1.25rem;
+    left:1.5rem;
+    z-index:999;
+    text-decoration:none;
+    font-family:'Manrope',sans-serif;
+    font-size:.65rem;
+    letter-spacing:.06em;
+    color:#666;
+    border:1px solid #222;
+    padding:.3rem .7rem;
+    background:#0F0F0F;
+    border-radius:3px;
+    transition:color .2s,border-color .2s;}
+    .home-btn:hover{color:#dcf33b;border-color:#dcf33b;}
+
+
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      transform: scale(0.96);
+      transition: opacity 0.6s cubic-bezier(0.4,0,0.2,1), transform 0.6s cubic-bezier(0.4,0,0.2,1);
+      pointer-events: none;
+      overflow-y: auto;
+    }
+    .slide.active {
+      opacity: 1;
+      transform: scale(1);
+      pointer-events: auto;
+    }
+    .slide.exit-left {
+      opacity: 0;
+      transform: scale(0.94) translateX(-4%);
+    }
+    .slide.exit-right {
+      opacity: 0;
+      transform: scale(0.94) translateX(4%);
+    }
+
+    .noise-overlay {
+      position: fixed; inset: 0;
+      pointer-events: none; z-index: 50;
+      opacity: 0.03;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    }
+
+    .gold-line {
+      width: 60px; height: 3px;
+      background: linear-gradient(135deg, #F2C94C 0%, #E6B800 100%);
+      border-radius: 2px;
+    }
+
+    .content-card {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 24px;
+      transition: all 0.3s ease;
+    }
+    .content-card:hover {
+      background: rgba(255,255,255,0.06);
+      border-color: rgba(242,201,76,0.2);
+      transform: translateY(-2px);
+    }
+
+    .slide-number { font-variant-numeric: tabular-nums; }
+    .progress-bar { transition: width 0.5s cubic-bezier(0.4,0,0.2,1); }
+
+    @keyframes float {
+      0%, 100% { transform: translateY(0px); }
+      50% { transform: translateY(-10px); }
+    }
+    .float-anim { animation: float 6s ease-in-out infinite; }
+
+    @keyframes shimmer {
+      0% { background-position: -200% center; }
+      100% { background-position: 200% center; }
+    }
+    .shimmer-text {
+      background: linear-gradient(90deg, #F2C94C 0%, #FFD369 25%, #fff 50%, #FFD369 75%, #F2C94C 100%);
+      background-size: 200% auto;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: shimmer 4s linear infinite;
+    }
+
+    @keyframes border-glow {
+      0%, 100% { border-color: rgba(242,201,76,0.15); }
+      50% { border-color: rgba(242,201,76,0.35); }
+    }
+    .glow-border { animation: border-glow 3s ease-in-out infinite; }
+
+    .spec-block {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 10px;
+      padding: 14px 10px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      transition: all 0.3s ease;
+    }
+    .spec-block:hover {
+      background: rgba(255,255,255,0.06);
+      border-color: rgba(242,201,76,0.2);
+    }
+
+    .data-table { font-variant-numeric: tabular-nums; }
+    .data-table td, .data-table th { padding: 10px 12px; }
+    .data-table tbody tr { border-bottom: 1px solid rgba(255,255,255,0.05); transition: background 0.2s; }
+    .data-table tbody tr:hover { background: rgba(255,255,255,0.03); }
+    .data-table tbody tr:last-child { border-bottom: none; }
+  </style>
+</head>
+<body class="bg-charcoal-950 text-white font-sans overflow-hidden h-screen w-screen relative">
+
+  <div class="noise-overlay"></div>
+
+  <!-- ======================== -->
+  <!-- SLIDE 1: COVER -->
+  <!-- ======================== -->
+  <div class="slide active" id="slide-0">
+    <div class="absolute inset-0 bg-dark-gradient"></div>
+    <div class="absolute inset-0 bg-cinematic-fade"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-gold-500/10 rounded-full blur-[120px] float-anim"></div>
+
+    <div class="relative z-10 flex flex-col items-center justify-center min-h-full px-6 py-12 text-center">
+
+      <div class="inline-flex items-center gap-2 px-5 py-2.5 rounded-full border border-gold-500/20 bg-gold-500/5 backdrop-blur-sm glow-border mb-8">
+        <iconify-icon icon="lucide:cpu" width="14" class="text-gold-400"></iconify-icon>
+        <span class="text-xs font-medium tracking-widest uppercase text-gold-300">Microprocessors &amp; Embedded Systems</span>
+      </div>
+
+      <h1 class="text-3xl sm:text-4xl lg:text-6xl font-semibold tracking-tighter leading-[1.1] mb-4 max-w-4xl">
+        Improving Cache Performance<br>
+        <span class="shimmer-text">Using Stride Prefetching</span> <span class="text-white">in gem5</span>
+      </h1>
+
+      <div class="gold-line mb-8 mt-4"></div>
+
+      <div class="flex flex-col sm:flex-row items-center gap-6 sm:gap-10">
+        <div class="text-center">
+          <p class="text-lg font-semibold text-white">Elias Abuamer</p>
+          <p class="text-sm text-neutral-500 font-light tracking-wide">ID: 2220206976</p>
+        </div>
+        <div class="hidden sm:block w-px h-10 bg-white/10"></div>
+        <div class="sm:hidden h-px w-10 bg-white/10"></div>
+        <div class="text-center">
+          <p class="text-lg font-semibold text-white">Fares Etweabi</p>
+          <p class="text-sm text-neutral-500 font-light tracking-wide">ID: 2200208829</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== -->
+  <!-- SLIDE 2: PROBLEM STATEMENT -->
+  <!-- ======================== -->
+  <div class="slide" id="slide-1">
+    <div class="absolute inset-0 bg-dark-gradient"></div>
+    <div class="absolute top-0 right-0 w-[400px] h-[400px] bg-gold-500/5 rounded-full blur-[100px]"></div>
+
+    <div class="relative z-10 flex flex-col justify-center min-h-full max-w-6xl mx-auto px-6 lg:px-12 py-10">
+      <div class="flex items-center gap-4 mb-8">
+        <span class="slide-number text-gold-400 font-bold text-2xl tracking-tight">01</span>
+        <div class="h-px flex-1 max-w-[80px] bg-gold-500/40"></div>
+        <span class="text-sm font-semibold tracking-widest uppercase text-neutral-300">Problem Statement &amp; Project Objective</span>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div class="content-card">
+          <div class="flex items-center gap-2 mb-4">
+            <iconify-icon icon="lucide:alert-triangle" width="18" class="text-gold-400"></iconify-icon>
+            <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">The Problem</h3>
+          </div>
+          <p class="text-sm text-neutral-300 font-light leading-relaxed mb-4">
+            Modern processors can execute instructions much faster than data can be retrieved from main memory. To reduce this gap, computer systems use a hierarchy of caches (L1 and L2) that store frequently accessed data closer to the CPU.
+          </p>
+          <p class="text-sm text-neutral-400 font-light leading-relaxed">
+            However, when the required data is not available in the cache, a <span class="text-gold-400 font-medium">cache miss</span> occurs and the processor must access the slower DDR3 main memory. This significantly increases memory access latency and reduces overall system performance.
+          </p>
+        </div>
+
+        <div class="space-y-4">
+          <div class="content-card !p-4">
+            <div class="flex items-center gap-2 mb-3">
+              <iconify-icon icon="lucide:server" width="16" class="text-gold-400"></iconify-icon>
+              <h3 class="text-xs font-semibold tracking-wide uppercase text-gold-300">Baseline System</h3>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div class="col-span-2 spec-block">
+                <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">CPU Model</p>
+                <p class="text-sm text-white font-medium">X86TimingSimpleCPU</p>
+              </div>
+              <div class="spec-block">
+                <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">L1 I-Cache</p>
+                <p class="text-sm text-white font-medium">16 KB</p>
+              </div>
+              <div class="spec-block">
+                <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">L1 D-Cache</p>
+                <p class="text-sm text-white font-medium">64 KB</p>
+              </div>
+              <div class="spec-block">
+                <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">L2 Cache</p>
+                <p class="text-sm text-white font-medium">256 KB</p>
+              </div>
+              <div class="spec-block">
+                <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Main Memory</p>
+                <p class="text-sm text-white font-medium">DDR3</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="p-4 rounded-xl border border-gold-500/20 bg-gold-500/5">
+            <div class="flex items-center gap-2 mb-2">
+              <iconify-icon icon="lucide:target" width="18" class="text-gold-400"></iconify-icon>
+              <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Project Objective</h3>
+            </div>
+            <p class="text-sm text-neutral-300 font-light leading-relaxed">
+              The objective of this project is to reduce memory access latency and improve performance by introducing a <span class="text-gold-400 font-medium">hardware prefetching mechanism</span> into the cache hierarchy and comparing its performance with the original baseline system.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== -->
+  <!-- SLIDE 3: IMPLEMENTATION -->
+  <!-- ======================== -->
+  <div class="slide" id="slide-2">
+    <div class="absolute inset-0 bg-dark-gradient"></div>
+    <div class="absolute bottom-0 left-0 w-[500px] h-[500px] bg-gold-500/5 rounded-full blur-[120px]"></div>
+
+    <div class="relative z-10 flex flex-col justify-center min-h-full max-w-6xl mx-auto px-6 lg:px-12 py-10">
+      <div class="flex items-center gap-4 mb-8">
+        <span class="slide-number text-gold-400 font-bold text-2xl tracking-tight">02</span>
+        <div class="h-px flex-1 max-w-[80px] bg-gold-500/40"></div>
+        <span class="text-sm font-semibold tracking-widest uppercase text-neutral-300">Project Implementation &amp; Proposed Solution</span>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+        <div class="content-card">
+          <div class="flex items-center gap-2 mb-4">
+            <iconify-icon icon="lucide:file-code" width="18" class="text-gold-400"></iconify-icon>
+            <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Custom Workload Development</h3>
+          </div>
+          <p class="text-sm text-neutral-300 font-light leading-relaxed mb-4">
+            The default Hello World program provided by gem5 is too small to generate meaningful memory activity. Therefore, a custom C program called <span class="text-gold-400 font-medium">array_sum.c</span> was developed and compiled.
+          </p>
+          <p class="text-sm text-neutral-400 font-light leading-relaxed">
+            This program creates a large array and sequentially accesses all elements while computing their sum. Because the memory accesses follow a predictable pattern, the workload is suitable for evaluating cache behavior and prefetching techniques.
+          </p>
+        </div>
+
+        <div class="space-y-4">
+          <div class="content-card">
+            <div class="flex items-center gap-2 mb-4">
+              <iconify-icon icon="lucide:zap" width="18" class="text-gold-400"></iconify-icon>
+              <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Stride Prefetcher Integration</h3>
+            </div>
+            <p class="text-sm text-neutral-300 font-light leading-relaxed mb-4">
+              To improve cache performance, a <span class="text-gold-400 font-medium">Stride Prefetcher</span> was attached to the L2 cache.
+            </p>
+            <p class="text-sm text-neutral-400 font-light leading-relaxed">
+              The prefetcher monitors memory access patterns and attempts to predict future memory requests. When a sequential pattern is detected, it fetches future cache blocks before the CPU explicitly requests them.
+            </p>
+          </div>
+
+          <div class="content-card !p-4">
+            <div class="flex items-center gap-2 mb-3">
+              <iconify-icon icon="lucide:sliders" width="16" class="text-gold-400"></iconify-icon>
+              <h3 class="text-xs font-semibold tracking-wide uppercase text-gold-300">Configurations Evaluated</h3>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div class="spec-block">
+                <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Config 1</p>
+                <p class="text-sm text-white font-medium">Degree = 2</p>
+              </div>
+              <div class="spec-block">
+                <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Config 2</p>
+                <p class="text-sm text-white font-medium">Degree = 4</p>
+              </div>
+              <div class="spec-block">
+                <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Config 3</p>
+                <p class="text-sm text-white font-medium">Degree = 8</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+  	
+  	<!-- SLIDE 4: STEPS 1 & 2 -->
+<div class="slide" id="slide-3">
+  <div class="absolute inset-0 bg-dark-gradient"></div>
+  <div class="absolute bottom-0 left-0 w-[500px] h-[500px] bg-gold-500/5 rounded-full blur-[120px]"></div>
+
+  <div class="relative z-10 flex flex-col justify-start min-h-full max-w-6xl mx-auto px-6 lg:px-12 py-10 pt-7">
+    <div class="flex items-center gap-4 mb-8">
+      <span class="slide-number text-gold-400 font-bold text-2xl tracking-tight">03</span>
+      <div class="h-px flex-1 max-w-[80px] bg-gold-500/40"></div>
+      <span class="text-sm font-semibold tracking-widest uppercase text-neutral-300">Implementation Overview</span>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+      <!-- Step 1 -->
+      <div class="content-card flex flex-col gap-4">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-full bg-gold-500/10 border border-gold-500/30 flex items-center justify-center shrink-0">
+            <span class="text-gold-400 font-bold text-xs">01</span>
+          </div>
+          <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Create the Benchmark</h3>
+        </div>
+        <p class="text-sm text-neutral-300 font-light leading-relaxed">
+          We wrote a custom C program <span class="text-gold-400 font-medium">array_sum.c</span> that allocates a 10-million element integer array, initialises each element, then sums them all. The sequential memory-access pattern makes it ideal for exercising the cache and evaluating prefetching.
+        </p>
+        <!-- code block -->
+        <div class="rounded-lg bg-black/40 border border-white/10 overflow-x-auto">
+          <div class="flex items-center gap-2 px-4 py-2 border-b border-white/10">
+            <iconify-icon icon="lucide:file-code-2" width="13" class="text-gold-400"></iconify-icon>
+            <span class="text-[10px] font-mono text-neutral-500 tracking-wider">array_sum.c</span>
+          </div>
+          <pre class="text-[11px] font-mono text-neutral-300 px-4 py-3 leading-relaxed whitespace-pre">#include &lt;stdio.h&gt;
+#define N 10000000
+
+int A[N];
+
+int main() {
+    long long sum = 0;
+    for (int i = 0; i &lt; N; i++) A[i] = i;
+    for (int i = 0; i &lt; N; i++) sum += A[i];
+    printf("Sum = %lld\n", sum);
+    return 0;
+}</pre>
+        </div>
+      </div>
+
+      <!-- Step 2 -->
+      <div class="content-card flex flex-col gap-4">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-full bg-gold-500/10 border border-gold-500/30 flex items-center justify-center shrink-0">
+            <span class="text-gold-400 font-bold text-xs">02</span>
+          </div>
+          <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Baseline Run — No Prefetcher</h3>
+        </div>
+        <p class="text-sm text-neutral-300 font-light leading-relaxed">
+          We simulated the benchmark on the two-level cache system <span class="text-gold-400 font-medium">without any prefetcher</span> to establish a performance baseline. The following command was used:
+        </p>
+        <!-- command block -->
+        <div class="rounded-lg bg-black/40 border border-white/10 overflow-x-auto">
+          <div class="flex items-center gap-2 px-4 py-2 border-b border-white/10">
+            <iconify-icon icon="lucide:terminal" width="13" class="text-gold-400"></iconify-icon>
+            <span class="text-[10px] font-mono text-neutral-500 tracking-wider">shell</span>
+          </div>
+          <pre class="text-[11px] font-mono text-neutral-300 px-4 py-3 leading-relaxed whitespace-pre">build/X86/gem5.opt \
+  configs/learning_gem5/part1/two_level.py \
+  ./array_sum</pre>
+        </div>
+        <p class="text-sm text-neutral-400 font-light leading-relaxed">
+          The key metrics were then extracted from <span class="text-gold-400 font-medium">m5out/stats.txt</span>:
+        </p>
+        <div class="rounded-lg bg-black/40 border border-white/10 overflow-x-auto">
+          <pre class="text-[11px] font-mono text-neutral-300 px-4 py-3 leading-relaxed whitespace-pre">grep "simTicks"         m5out/stats.txt
+grep "simInsts"         m5out/stats.txt
+grep -i "overallMissRate" m5out/stats.txt</pre>
+        </div>
+        <div class="flex items-start gap-2 mt-1 p-3 rounded-lg bg-red-500/5 border border-red-500/15">
+          <iconify-icon icon="lucide:alert-circle" width="14" class="text-red-400 mt-0.5 shrink-0"></iconify-icon>
+          <p class="text-xs text-neutral-400 font-light leading-relaxed">
+            Result: <span class="text-red-400 font-medium">237.71 B ticks</span> with an L2 miss rate of <span class="text-red-400 font-medium">99.98%</span> — confirming severe cache pressure.
+          </p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 5: STEPS 3 & 4 -->
+<div class="slide" id="slide-4">
+  <div class="absolute inset-0 bg-dark-gradient"></div>
+  <div class="absolute top-0 right-0 w-[400px] h-[400px] bg-gold-500/5 rounded-full blur-[100px]"></div>
+
+  <div class="relative z-10 flex flex-col justify-start min-h-full max-w-6xl mx-auto px-6 lg:px-12 py-10 pt-7">
+    <div class="flex items-center gap-4 mb-8">
+      <span class="slide-number text-gold-400 font-bold text-2xl tracking-tight">04</span>
+      <div class="h-px flex-1 max-w-[80px] bg-gold-500/40"></div>
+      <span class="text-sm font-semibold tracking-widest uppercase text-neutral-300">Implementation Overview</span>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+      <!-- Step 3 -->
+      <div class="content-card flex flex-col gap-4">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-full bg-gold-500/10 border border-gold-500/30 flex items-center justify-center shrink-0">
+            <span class="text-gold-400 font-bold text-xs">03</span>
+          </div>
+          <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Enable the Stride Prefetcher (Degree 4)</h3>
+        </div>
+        <p class="text-sm text-neutral-300 font-light leading-relaxed">
+          We edited <span class="text-gold-400 font-medium">configs/learning_gem5/part1/caches.py</span> to attach a <span class="text-gold-400 font-medium">StridePrefetcher</span> to the L2 cache. Two changes were required:
+        </p>
+        <!-- import -->
+        <div class="rounded-lg bg-black/40 border border-white/10 overflow-x-auto">
+          <div class="flex items-center gap-2 px-4 py-2 border-b border-white/10">
+            <iconify-icon icon="lucide:file-code-2" width="13" class="text-gold-400"></iconify-icon>
+            <span class="text-[10px] font-mono text-neutral-500 tracking-wider">caches.py — import</span>
+          </div>
+          <pre class="text-[11px] font-mono text-neutral-300 px-4 py-3 leading-relaxed whitespace-pre">import m5
+from m5.objects import Cache, <span class="text-gold-300">StridePrefetcher</span></pre>
+        </div>
+        <!-- L2Cache class -->
+        <div class="rounded-lg bg-black/40 border border-white/10 overflow-x-auto">
+          <div class="flex items-center gap-2 px-4 py-2 border-b border-white/10">
+            <iconify-icon icon="lucide:file-code-2" width="13" class="text-gold-400"></iconify-icon>
+            <span class="text-[10px] font-mono text-neutral-500 tracking-wider">caches.py — L2Cache class</span>
+          </div>
+          <pre class="text-[11px] font-mono text-neutral-300 px-4 py-3 leading-relaxed whitespace-pre">class L2Cache(Cache):
+    size         = "256KiB"
+    assoc        = 8
+    tag_latency  = 20
+    data_latency = 20
+    ...
+    <span class="text-gold-300">prefetcher = StridePrefetcher(degree=4)</span></pre>
+        </div>
+        <div class="flex items-start gap-2 p-3 rounded-lg bg-gold-500/5 border border-gold-500/15">
+          <iconify-icon icon="lucide:repeat" width="14" class="text-gold-400 mt-0.5 shrink-0"></iconify-icon>
+          <p class="text-xs text-neutral-400 font-light leading-relaxed">
+            Re-run the same gem5 command and collect <span class="text-gold-400 font-medium">simTicks</span>, <span class="text-gold-400 font-medium">simInsts</span>, and <span class="text-gold-400 font-medium">overallMissRate</span> from stats.txt to compare against baseline.
+          </p>
+        </div>
+      </div>
+
+      <!-- Step 4 -->
+      <div class="content-card flex flex-col gap-4">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-full bg-gold-500/10 border border-gold-500/30 flex items-center justify-center shrink-0">
+            <span class="text-gold-400 font-bold text-xs">04</span>
+          </div>
+          <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Tune Prefetch Degree (8 &amp; 2)</h3>
+        </div>
+        <p class="text-sm text-neutral-300 font-light leading-relaxed">
+          To find the optimal configuration, the <span class="text-gold-400 font-medium">degree</span> parameter was changed and the experiment was repeated. Degree controls how many future cache lines the prefetcher fetches ahead on each stride detection.
+        </p>
+        <!-- degree variants -->
+        <div class="grid grid-cols-3 gap-2">
+          <div class="spec-block">
+            <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Degree 2</p>
+            <p class="text-xs text-white font-medium font-mono">degree=2</p>
+            <p class="text-[10px] text-neutral-500 mt-1">Conservative</p>
+          </div>
+          <div class="spec-block border-gold-500/30 bg-gold-500/5">
+            <p class="text-[10px] text-gold-400 uppercase tracking-wider mb-1">Degree 4 ★</p>
+            <p class="text-xs text-white font-medium font-mono">degree=4</p>
+            <p class="text-[10px] text-gold-500 mt-1">Optimal</p>
+          </div>
+          <div class="spec-block">
+            <p class="text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Degree 8</p>
+            <p class="text-xs text-white font-medium font-mono">degree=8</p>
+            <p class="text-[10px] text-neutral-500 mt-1">Aggressive</p>
+          </div>
+        </div>
+        <!-- code change -->
+        <div class="rounded-lg bg-black/40 border border-white/10 overflow-x-auto">
+          <div class="flex items-center gap-2 px-4 py-2 border-b border-white/10">
+            <iconify-icon icon="lucide:pencil" width="13" class="text-gold-400"></iconify-icon>
+            <span class="text-[10px] font-mono text-neutral-500 tracking-wider">edit in caches.py</span>
+          </div>
+          <pre class="text-[11px] font-mono text-neutral-300 px-4 py-3 leading-relaxed whitespace-pre"><span class="text-neutral-600"># degree 2</span>
+prefetcher = StridePrefetcher(degree=2)
+
+<span class="text-neutral-600"># degree 8</span>
+prefetcher = StridePrefetcher(degree=8)</pre>
+        </div>
+        <div class="flex items-start gap-2 p-3 rounded-lg bg-gold-500/5 border border-gold-500/15">
+          <iconify-icon icon="lucide:info" width="14" class="text-gold-400 mt-0.5 shrink-0"></iconify-icon>
+          <p class="text-xs text-neutral-400 font-light leading-relaxed">
+            After each change, re-run the simulation and record the stats. Results from all three degrees are compared in the <span class="text-gold-400 font-medium">Experimental Results</span> slide.
+          </p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+  <!-- ======================== -->
+  <!-- SLIDE 4: EXPERIMENTAL RESULTS -->
+  <!-- ======================== -->
+  <div class="slide" id="slide-5">
+    <div class="absolute inset-0 bg-dark-gradient"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-gold-500/5 rounded-full blur-[120px]"></div>
+
+    <div class="relative z-10 flex flex-col justify-center min-h-full max-w-6xl mx-auto px-6 lg:px-12 py-10">
+      <div class="flex items-center gap-4 mb-8">
+        <span class="slide-number text-gold-400 font-bold text-2xl tracking-tight">05</span>
+        <div class="h-px flex-1 max-w-[80px] bg-gold-500/40"></div>
+        <span class="text-sm font-semibold tracking-widest uppercase text-neutral-300">Experimental Results</span>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+        <div class="content-card !p-0 overflow-hidden">
+          <div class="flex items-center gap-2 px-5 pt-5 pb-3">
+            <iconify-icon icon="lucide:table" width="18" class="text-gold-400"></iconify-icon>
+            <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Performance Comparison</h3>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="data-table w-full text-left text-sm">
+              <thead>
+                <tr class="border-b border-white/10">
+                  <th class="text-[10px] text-gold-300 font-semibold uppercase tracking-wider pl-5 pr-3 pb-3">Configuration</th>
+                  <th class="text-[10px] text-gold-300 font-semibold uppercase tracking-wider px-3 pb-3">simTicks (B)</th>
+                  <th class="text-[10px] text-gold-300 font-semibold uppercase tracking-wider px-3 pb-3">L2 Miss Rate</th>
+                  <th class="text-[10px] text-gold-300 font-semibold uppercase tracking-wider px-3 pb-3">Accuracy</th>
+                  <th class="text-[10px] text-gold-300 font-semibold uppercase tracking-wider pl-3 pr-5 pb-3">Coverage</th>
+                </tr>
+              </thead>
+              <tbody class="text-neutral-300 font-light">
+                <tr>
+                  <td class="pl-5 pr-3 text-neutral-400">No Prefetch</td>
+                  <td class="px-3">237.71</td>
+                  <td class="px-3 text-red-400/80 font-medium">99.98%</td>
+                  <td class="px-3 text-neutral-600">—</td>
+                  <td class="pl-3 pr-5 text-neutral-600">—</td>
+                </tr>
+                <tr>
+                  <td class="pl-5 pr-3">Degree 2</td>
+                  <td class="px-3">143.56</td>
+                  <td class="px-3">5.00%</td>
+                  <td class="px-3">48.7%</td>
+                  <td class="pl-3 pr-5">98.2%</td>
+                </tr>
+                <tr class="bg-gold-500/[0.04]">
+                  <td class="pl-5 pr-3 text-white font-medium">Degree 4</td>
+                  <td class="px-3 text-gold-400 font-semibold">142.25</td>
+                  <td class="px-3">1.79%</td>
+                  <td class="px-3">25.6%</td>
+                  <td class="pl-3 pr-5">98.3%</td>
+                </tr>
+                <tr>
+                  <td class="pl-5 pr-3">Degree 8</td>
+                  <td class="px-3">142.74</td>
+                  <td class="px-3 text-gold-400 font-semibold">1.73%</td>
+                  <td class="px-3">13.2%</td>
+                  <td class="pl-3 pr-5">98.3%</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="content-card">
+          <div class="flex items-center gap-2 mb-5">
+            <iconify-icon icon="lucide:eye" width="18" class="text-gold-400"></iconify-icon>
+            <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Key Observations</h3>
+          </div>
+          <ul class="space-y-4">
+            <li class="flex items-start gap-3">
+              <iconify-icon icon="lucide:chevron-right" width="16" class="text-gold-500 mt-1 shrink-0"></iconify-icon>
+              <span class="text-sm text-neutral-300 font-light leading-relaxed">All prefetching configurations significantly reduced execution time compared to the baseline.</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <iconify-icon icon="lucide:chevron-right" width="16" class="text-gold-500 mt-1 shrink-0"></iconify-icon>
+              <span class="text-sm text-neutral-300 font-light leading-relaxed">The <span class="text-gold-400 font-medium">L2 miss rate</span> dropped dramatically after introducing the prefetcher.</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <iconify-icon icon="lucide:chevron-right" width="16" class="text-gold-500 mt-1 shrink-0"></iconify-icon>
+              <span class="text-sm text-neutral-300 font-light leading-relaxed"><span class="text-gold-400 font-medium">Degree 4</span> achieved the best overall execution time.</span>
+            </li>
+            <li class="flex items-start gap-3">
+              <iconify-icon icon="lucide:chevron-right" width="16" class="text-gold-500 mt-1 shrink-0"></iconify-icon>
+              <span class="text-sm text-neutral-300 font-light leading-relaxed"><span class="text-gold-400 font-medium">Degree 8</span> produced the lowest miss rate but did not provide the best performance.</span>
+            </li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== -->
+  <!-- SLIDE 5: DISCUSSION & CONCLUSION -->
+  <!-- ======================== -->
+  <div class="slide" id="slide-6">
+    <div class="absolute inset-0 bg-dark-gradient"></div>
+    <div class="absolute inset-0 bg-cinematic-fade"></div>
+    <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-gold-500/10 rounded-full blur-[120px]"></div>
+
+    <div class="relative z-10 flex flex-col justify-center min-h-full max-w-6xl mx-auto px-6 lg:px-12 py-10">
+      <div class="flex items-center gap-4 mb-8">
+        <span class="slide-number text-gold-400 font-bold text-2xl tracking-tight">06</span>
+        <div class="h-px flex-1 max-w-[80px] bg-gold-500/40"></div>
+        <span class="text-sm font-semibold tracking-widest uppercase text-neutral-300">Discussion &amp; Conclusion</span>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+        <div class="space-y-4">
+          <div class="content-card !p-0 overflow-hidden">
+            <div class="flex items-center gap-2 px-5 pt-5 pb-3">
+              <iconify-icon icon="lucide:bar-chart-3" width="18" class="text-gold-400"></iconify-icon>
+              <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Prefetch Efficiency Analysis</h3>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="data-table w-full text-left text-sm">
+                <thead>
+                  <tr class="border-b border-white/10">
+                    <th class="text-[10px] text-gold-300 font-semibold uppercase tracking-wider pl-5 pr-3 pb-3">Degree</th>
+                    <th class="text-[10px] text-gold-300 font-semibold uppercase tracking-wider px-3 pb-3">Prefetches Issued</th>
+                    <th class="text-[10px] text-gold-300 font-semibold uppercase tracking-wider pl-3 pr-5 pb-3">Useful Prefetches</th>
+                  </tr>
+                </thead>
+                <tbody class="text-neutral-300 font-light">
+                  <tr>
+                    <td class="pl-5 pr-3">2</td>
+                    <td class="px-3">2.44 M</td>
+                    <td class="pl-3 pr-5">1.19 M</td>
+                  </tr>
+                  <tr class="bg-gold-500/[0.04]">
+                    <td class="pl-5 pr-3 text-white font-medium">4</td>
+                    <td class="px-3">4.81 M</td>
+                    <td class="pl-3 pr-5 text-gold-400 font-semibold">1.23 M</td>
+                  </tr>
+                  <tr>
+                    <td class="pl-5 pr-3">8</td>
+                    <td class="px-3">9.30 M</td>
+                    <td class="pl-3 pr-5">1.23 M</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="content-card">
+            <div class="flex items-center gap-2 mb-4">
+              <iconify-icon icon="lucide:message-square" width="18" class="text-gold-400"></iconify-icon>
+              <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Discussion</h3>
+            </div>
+            <p class="text-sm text-neutral-300 font-light leading-relaxed mb-4">
+              Although <span class="text-gold-400 font-medium">Degree 8</span> generated nearly twice as many prefetch requests as Degree 4, the number of useful prefetches remained almost unchanged. As a result, memory traffic increased while the performance improvement became negligible.
+            </p>
+            <p class="text-sm text-neutral-400 font-light leading-relaxed">
+              This demonstrates that increasing prefetch aggressiveness beyond a certain point can <span class="text-gold-400 font-medium">reduce efficiency</span> rather than improve it.
+            </p>
+          </div>
+        </div>
+
+        <div class="content-card">
+          <div class="flex items-center gap-2 mb-4">
+            <iconify-icon icon="lucide:check-circle" width="18" class="text-gold-400"></iconify-icon>
+            <h3 class="text-sm font-semibold tracking-wide uppercase text-gold-300">Conclusion</h3>
+          </div>
+          <p class="text-sm text-neutral-300 font-light leading-relaxed mb-4">
+            This project successfully demonstrated the effectiveness of <span class="text-gold-400 font-medium">hardware prefetching</span> in reducing memory access latency.
+          </p>
+          <p class="text-sm text-neutral-300 font-light leading-relaxed mb-4">
+            By developing a custom memory-intensive workload and integrating a Stride Prefetcher into the L2 cache, execution time was reduced from <span class="text-red-400/80 font-medium">237.7B</span> ticks to approximately <span class="text-gold-400 font-semibold">142.3B</span> ticks.
+          </p>
+          <p class="text-sm text-neutral-300 font-light leading-relaxed">
+            Among all tested configurations, <span class="text-gold-400 font-medium">Degree 4</span> provided the best balance between performance improvement and prefetch efficiency, making it the <span class="text-gold-400 font-medium">optimal configuration</span> for this workload.
+          </p>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== -->
+  <!-- NAVIGATION -->
+  <!-- ======================== -->
+  <div class="fixed top-0 left-0 w-full h-1 bg-white/5 z-40">
+    <div id="progress-bar" class="progress-bar h-full bg-gold-gradient" style="width: 20%"></div>
+  </div>
+
+<div class="fixed top-6 left-6 z-40 flex items-center gap-2">
+  <span id="current-slide" class="hidden">01</span>
+</div>
+
+  <div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3">
+    <button onclick="goToSlide(0)" class="dot w-2.5 h-2.5 rounded-full bg-gold-400 transition-all duration-300"></button>
+    <button onclick="goToSlide(1)" class="dot w-2.5 h-2.5 rounded-full bg-neutral-600 hover:bg-neutral-400 transition-all duration-300"></button>
+    <button onclick="goToSlide(2)" class="dot w-2.5 h-2.5 rounded-full bg-neutral-600 hover:bg-neutral-400 transition-all duration-300"></button>
+    <button onclick="goToSlide(3)" class="dot w-2.5 h-2.5 rounded-full bg-neutral-600 hover:bg-neutral-400 transition-all duration-300"></button>
+    <button onclick="goToSlide(4)" class="dot w-2.5 h-2.5 rounded-full bg-neutral-600 hover:bg-neutral-400 transition-all duration-300"></button>
+    <button onclick="goToSlide(5)" class="dot w-2.5 h-2.5 rounded-full bg-neutral-600 hover:bg-neutral-400 transition-all duration-300"></button>
+    <button onclick="goToSlide(6)" class="dot w-2.5 h-2.5 rounded-full bg-neutral-600 hover:bg-neutral-400 transition-all duration-300"></button>
+  </div>
+
+  <div class="fixed bottom-6 right-6 z-40 hidden lg:flex items-center gap-2 text-neutral-600 text-xs">
+    <kbd class="px-1.5 py-0.5 rounded border border-white/10 bg-white/5 font-mono">←</kbd>
+    <kbd class="px-1.5 py-0.5 rounded border border-white/10 bg-white/5 font-mono">→</kbd>
+    <span>to navigate</span>
+  </div>
+
+  <button onclick="toggleFullscreen()" class="fixed top-6 right-6 z-40 w-10 h-10 rounded-full border border-white/10 bg-charcoal-900/80 backdrop-blur-md flex items-center justify-center text-neutral-500 hover:text-gold-400 hover:border-gold-500/30 transition-all duration-300">
+    <iconify-icon icon="lucide:maximize" width="16"></iconify-icon>
+  </button>
+
+<a href="cache-prefetch.html" class="fixed top-6 right-20 z-40 w-10 h-10 rounded-full border border-white/10 bg-charcoal-900/80 backdrop-blur-md flex items-center justify-center text-neutral-500 hover:text-gold-400 hover:border-gold-500/30 transition-all duration-300">
+    <iconify-icon icon="lucide:sun" width="16"></iconify-icon>
+  </a>
+
+  <script>
+    let current = 0;
+    const total = 7;
+    const slides = document.querySelectorAll('.slide');
+    const dots = document.querySelectorAll('.dot');
+    const progressBar = document.getElementById('progress-bar');
+    const currentSlideEl = document.getElementById('current-slide');
+    let isAnimating = false;
+
+    function updateUI() {
+      currentSlideEl.textContent = String(current + 1).padStart(2, '0');
+      progressBar.style.width = ((current + 1) / total * 100) + '%';
+      dots.forEach((dot, i) => {
+        if (i === current) {
+          dot.classList.remove('bg-neutral-600');
+          dot.classList.add('bg-gold-400');
+          dot.style.width = '24px';
+          dot.style.borderRadius = '9999px';
+        } else {
+          dot.classList.add('bg-neutral-600');
+          dot.classList.remove('bg-gold-400');
+          dot.style.width = '10px';
+          dot.style.borderRadius = '9999px';
+        }
+      });
+    }
+
+    function goToSlide(index) {
+      if (index === current || isAnimating || index < 0 || index >= total) return;
+      isAnimating = true;
+      const direction = index > current ? 1 : -1;
+      const oldSlide = slides[current];
+      const newSlide = slides[index];
+      oldSlide.classList.remove('active');
+      oldSlide.classList.add(direction > 0 ? 'exit-left' : 'exit-right');
+      newSlide.scrollTop = 0;
+      newSlide.classList.add('active');
+      current = index;
+      updateUI();
+      setTimeout(() => {
+        oldSlide.classList.remove('exit-left', 'exit-right');
+        isAnimating = false;
+      }, 600);
+    }
+
+    function navigate(dir) {
+      goToSlide(current + dir);
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') {
+        e.preventDefault();
+        navigate(1);
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        navigate(-1);
+      }
+    });
+
+    let touchStartX = 0;
+    document.addEventListener('touchstart', (e) => {
+      touchStartX = e.changedTouches[0].screenX;
+    }, { passive: true });
+    document.addEventListener('touchend', (e) => {
+      const diff = touchStartX - e.changedTouches[0].screenX;
+      if (Math.abs(diff) > 60) navigate(diff > 0 ? 1 : -1);
+    }, { passive: true });
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen();
+      }
+    }
+
+    updateUI();
+  </script>
+  <a href="/#projects" class="home-btn">← FaresHere</a>
+</body>
+</html>

@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Piano Sound Generation via RISC-V — Fares Etweabi</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+:root{
+--bg:#0a0a0a;--surface:#111;--border:#222;--accent:#e8ff47;--accent-text:#e8ff47;
+--text:#f0f0f0;--muted:#666;--card:#141414;--ink:#0a0a0a;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+html{scroll-behavior:smooth;}
+body{
+background:var(--bg);color:var(--text);
+font-family:'DM Mono',monospace;font-weight:300;
+cursor:none;overflow-x:hidden;
+}
+#cursor{
+position:fixed;width:10px;height:10px;
+background:var(--accent);border-radius:50%;
+pointer-events:none;z-index:9999;
+transform:translate(-50%,-50%);
+transition:transform .1s,width .2s,height .2s;
+mix-blend-mode:difference;
+}
+#cursor.expand{width:40px;height:40px;}
+body::before{
+content:'';position:fixed;inset:0;
+background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+pointer-events:none;z-index:0;opacity:.4;
+}
+nav{
+position:fixed;top:0;left:0;right:0;z-index:100;
+display:flex;justify-content:space-between;align-items:center;
+padding:1.5rem 3rem;
+border-bottom:1px solid var(--border);
+backdrop-filter:blur(20px);background:rgba(10,10,10,.8);
+}
+.nav-logo{font-family:'Syne',sans-serif;font-weight:800;font-size:1.1rem;letter-spacing:-.02em;color:var(--text);text-decoration:none;}
+.nav-logo span{color:var(--accent-text);}
+.nav-links{display:flex;gap:2rem;list-style:none;overflow-x:auto;}
+.nav-links a{color:var(--muted);text-decoration:none;font-size:.75rem;letter-spacing:.15em;text-transform:uppercase;transition:color .2s;white-space:nowrap;}
+.nav-links a:hover{color:var(--accent-text);}
+.nav-actions{display:flex;gap:.6rem;}
+.nav-icon-btn{
+width:2.1rem;height:2.1rem;display:flex;align-items:center;justify-content:center;
+border:1px solid var(--border);color:var(--muted);text-decoration:none;
+font-size:.95rem;transition:border-color .2s,color .2s;
+}
+.nav-icon-btn:hover{border-color:var(--accent-text);color:var(--accent-text);}
+
+#hero{
+min-height:100vh;display:flex;flex-direction:column;
+justify-content:flex-end;padding:7rem 3rem 4rem;
+position:relative;border-bottom:1px solid var(--border);
+}
+.back-link{font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);text-decoration:none;margin-bottom:2rem;display:inline-flex;align-items:center;gap:.5rem;transition:color .2s;width:fit-content;}
+.back-link:hover{color:var(--accent-text);}
+.hero-tag{
+font-size:.7rem;letter-spacing:.2em;text-transform:uppercase;
+color:var(--accent-text);margin-bottom:1.5rem;
+display:flex;align-items:center;gap:.75rem;
+}
+.hero-tag::before{content:'';display:block;width:2rem;height:1px;background:var(--accent-text);}
+.hero-title{
+font-family:'Syne',sans-serif;font-weight:800;
+font-size:clamp(2.5rem,7vw,5.5rem);line-height:.98;
+letter-spacing:-.03em;margin-bottom:1.5rem;
+}
+.hero-title .line{display:block;overflow:hidden;}
+.hero-title .line span{display:block;animation:slideUp .8s cubic-bezier(.16,1,.3,1) both;}
+.hero-title .line:nth-child(2) span{animation-delay:.1s;color:var(--accent-text);}
+@keyframes slideUp{from{transform:translateY(110%);}to{transform:translateY(0);}}
+
+.piano{position:relative;width:100%;max-width:560px;margin:1rem 0 2.5rem;}
+.piano-white-row{display:flex;width:100%;border:1px solid var(--border);position:relative;z-index:1;}
+.pw-key{flex:1;height:170px;border-right:1px solid var(--border);display:flex;flex-direction:column;justify-content:flex-end;align-items:center;padding-bottom:.85rem;background:var(--card);transition:background .15s;cursor:pointer;}
+.pw-key:last-child{border-right:none;}
+.pw-key:hover,.pw-key.key-active{background:var(--accent);}
+.pk-letter{font-family:'DM Mono',monospace;font-size:.8rem;color:var(--muted);transition:color .15s;}
+.pk-note{font-family:'Syne',sans-serif;font-weight:700;font-size:.6rem;letter-spacing:.06em;text-transform:uppercase;color:var(--text);margin-top:.2rem;transition:color .15s;}
+.pw-key:hover .pk-letter,.pw-key:hover .pk-note,.pw-key.key-active .pk-letter,.pw-key.key-active .pk-note{color:var(--ink);}
+.piano-black-row{position:absolute;top:0;left:0;width:100%;height:58%;z-index:2;}
+.pb-key{position:absolute;top:0;width:8%;height:100%;background:var(--ink);display:flex;flex-direction:column;justify-content:flex-end;align-items:center;padding-bottom:.6rem;box-shadow:0 6px 10px rgba(0,0,0,.5);transition:background .15s;cursor:pointer;}
+.pb-key .pk-letter{color:var(--accent-text);font-size:.7rem;}
+.pb-key:hover,.pb-key.key-active{background:var(--accent);}
+.pb-key:hover .pk-letter,.pb-key.key-active .pk-letter{color:var(--ink);}
+.piano-caption{font-size:.7rem;color:var(--muted);letter-spacing:.05em;margin-top:.75rem;}
+
+.hero-sub{
+display:flex;justify-content:space-between;align-items:flex-end;
+border-top:1px solid var(--border);padding-top:2rem;
+}
+.hero-desc{font-size:.85rem;color:var(--muted);max-width:380px;line-height:1.7;}
+.hero-scroll{font-size:.7rem;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:.5rem;}
+.scroll-line{width:1px;height:3rem;background:linear-gradient(var(--accent-text),transparent);animation:scrollAnim 1.5s ease-in-out infinite;}
+@keyframes scrollAnim{0%,100%{transform:scaleY(1);opacity:1;}50%{transform:scaleY(.5);opacity:.5;}}
+
+section{padding:5rem 3rem;border-bottom:1px solid var(--border);position:relative;}
+.section-label{
+font-size:.65rem;letter-spacing:.25em;text-transform:uppercase;
+color:var(--muted);margin-bottom:3rem;
+display:flex;align-items:center;gap:1rem;
+}
+.section-label::after{content:'';flex:1;height:1px;background:var(--border);}
+
+.about-grid{display:grid;grid-template-columns:1.3fr 1fr;gap:4rem;align-items:start;}
+.about-text{font-size:1.02rem;line-height:1.8;color:var(--muted);}
+.about-text strong{color:var(--text);font-weight:400;}
+.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;}
+.stat-card{border:1px solid var(--border);padding:1.5rem;background:var(--card);position:relative;overflow:hidden;transition:border-color .3s;}
+.stat-card:hover{border-color:var(--accent-text);}
+.stat-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent-text);transform:scaleX(0);transform-origin:left;transition:transform .3s;}
+.stat-card:hover::before{transform:scaleX(1);}
+.stat-num{font-family:'Syne',sans-serif;font-weight:800;font-size:1.7rem;color:var(--accent-text);line-height:1;margin-bottom:.4rem;}
+.stat-label{font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);line-height:1.5;}
+
+.reg-table{width:100%;border-collapse:collapse;font-size:.85rem;}
+.reg-table th,.reg-table td{text-align:left;padding:.9rem 1rem;border-bottom:1px solid var(--border);}
+.reg-table th{color:var(--muted);font-size:.65rem;letter-spacing:.15em;text-transform:uppercase;font-weight:400;}
+.reg-table td.reg{color:var(--accent-text);font-weight:400;white-space:nowrap;}
+.reg-table td.val{color:var(--text);}
+.reg-table td.desc{color:var(--muted);}
+
+.flow-list{list-style:none;counter-reset:flow;}
+.flow-list li{counter-increment:flow;display:grid;grid-template-columns:2.5rem 1fr;gap:1rem;padding:1.1rem 0;border-bottom:1px solid var(--border);}
+.flow-list li::before{content:counter(flow,decimal-leading-zero);font-family:'Syne',sans-serif;font-weight:800;color:var(--accent-text);font-size:.9rem;}
+.flow-list li span{color:var(--muted);font-size:.9rem;line-height:1.6;}
+.flow-list li span strong{color:var(--text);font-weight:400;}
+.flow-sub-label{font-family:'Syne',sans-serif;font-weight:700;font-size:1.1rem;margin:3rem 0 1rem;color:var(--text);}
+.flow-sub-label:first-of-type{margin-top:0;}
+
+.code-block{background:var(--card);border:1px solid var(--border);padding:1.4rem 1.6rem;margin-bottom:1.5rem;overflow-x:auto;}
+.code-block-label{font-size:.65rem;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);margin-bottom:1rem;}
+.code-block pre{font-family:'DM Mono',monospace;font-size:.78rem;line-height:1.85;color:var(--text);white-space:pre;}
+.code-block .mn{color:var(--accent-text);}
+.code-block .cm{color:var(--muted);}
+
+.egg-box{border:1px dashed var(--border);padding:2rem;margin-top:1.5rem;background:var(--card);}
+.egg-box .egg-tag{font-size:.65rem;letter-spacing:.2em;text-transform:uppercase;color:var(--accent-text);margin-bottom:.75rem;}
+
+.test-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);margin-top:2rem;}
+.test-item{background:var(--bg);padding:1.5rem;}
+.test-item .test-num{font-size:.7rem;color:var(--muted);}
+.test-item p{font-size:.85rem;color:var(--muted);margin-top:.6rem;line-height:1.6;}
+.test-item p strong{color:var(--text);font-weight:400;}
+
+footer{padding:3rem 3rem;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:2rem;}
+.footer-credits{font-size:.75rem;color:var(--muted);line-height:1.8;}
+.footer-credits strong{color:var(--text);font-weight:400;}
+.footer-back{font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);text-decoration:none;border-bottom:1px solid var(--border);padding-bottom:.5rem;transition:color .2s,border-color .2s;}
+.footer-back:hover{color:var(--accent-text);border-color:var(--accent-text);}
+
+.reveal{opacity:0;transform:translateY(30px);transition:opacity .7s,transform .7s cubic-bezier(.16,1,.3,1);}
+.reveal.visible{opacity:1;transform:none;}
+
+@media(max-width:768px){
+.about-grid{grid-template-columns:1fr;gap:2rem;}
+.test-grid{grid-template-columns:1fr;}
+nav{padding:1.25rem 1.5rem;}
+section{padding:3rem 1.5rem;}
+#hero{padding:6rem 1.5rem 3rem;}
+.hero-sub{flex-direction:column;gap:1.5rem;align-items:flex-start;}
+.pw-key{height:120px;}
+.pk-letter{font-size:.7rem;}
+.pk-note{font-size:.55rem;}
+footer{flex-direction:column;align-items:flex-start;}
+}
+</style>
+</head>
+<body>
+<div id="cursor"></div>
+<nav>
+  <a href="/#projects" class="nav-logo">F<span>.</span>E</a>
+  <ul class="nav-links">
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#sound">Sound</a></li>
+    <li><a href="#flow">Flow</a></li>
+    <li><a href="#code">Code</a></li>
+    <li><a href="#testing">Testing</a></li>
+  </ul>
+</nav>
+
+<section id="hero">
+  <a href="/#projects" class="back-link">← Back to FaresHere</a>
+  <div class="hero-tag">EC351 — Spring 2025 · RISC-V Assembly</div>
+  <h1 class="hero-title">
+    <span class="line"><span>Piano Sound</span></span>
+    <span class="line"><span>via RISC-V</span></span>
+  </h1>
+
+  <div class="piano reveal" aria-label="Keyboard key to MIDI note mapping">
+    <div class="piano-white-row">
+      <div class="pw-key" data-letter="a" data-midi="72"><span class="pk-letter">a</span><span class="pk-note">C5</span></div>
+      <div class="pw-key" data-letter="s" data-midi="74"><span class="pk-letter">s</span><span class="pk-note">D5</span></div>
+      <div class="pw-key" data-letter="d" data-midi="76"><span class="pk-letter">d</span><span class="pk-note">E5</span></div>
+      <div class="pw-key" data-letter="f" data-midi="77"><span class="pk-letter">f</span><span class="pk-note">F5</span></div>
+      <div class="pw-key" data-letter="g" data-midi="79"><span class="pk-letter">g</span><span class="pk-note">G5</span></div>
+      <div class="pw-key" data-letter="h" data-midi="81"><span class="pk-letter">h</span><span class="pk-note">A5</span></div>
+      <div class="pw-key" data-letter="j" data-midi="83"><span class="pk-letter">j</span><span class="pk-note">B5</span></div>
+      <div class="pw-key" data-letter="k" data-midi="84"><span class="pk-letter">k</span><span class="pk-note">C6</span></div>
+    </div>
+    <div class="piano-black-row">
+      <div class="pb-key" data-letter="w" data-midi="73" style="left:8.5%"><span class="pk-letter">w</span></div>
+      <div class="pb-key" data-letter="e" data-midi="75" style="left:21%"><span class="pk-letter">e</span></div>
+      <div class="pb-key" data-letter="r" data-midi="78" style="left:46%"><span class="pk-letter">r</span></div>
+      <div class="pb-key" data-letter="t" data-midi="80" style="left:58.5%"><span class="pk-letter">t</span></div>
+      <div class="pb-key" data-letter="y" data-midi="82" style="left:71%"><span class="pk-letter">y</span></div>
+    </div>
+  </div>
+  <p class="piano-caption">Click a key, or just type a,s,d,f,g,h,j,k and w,e,r,t,y all play. (This is only a broswer preview); the real program runs as RISC-V inside RARS.</p>
+
+  <div class="hero-sub">
+    <p class="hero-desc">A playable piano simulated entirely in RISC-V assembly — keyboard input mapped to MIDI notes, an automated "Twinkle Twinkle Little Star," and a hidden surprise for anyone who types the right four letters.</p>
+    <div class="hero-scroll"><span>Scroll</span><div class="scroll-line"></div></div>
+  </div>
+</section>
+
+<section id="overview">
+  <div class="section-label">01 — Overview</div>
+  <div class="about-grid">
+    <div class="about-text reveal">
+      <p>Built for <strong>EC351</strong> with Elias Abuamer and Mohammed Almoldy, this project simulates a playable piano using nothing but the RISC-V instruction set, run inside the <strong>RARS</strong> simulator. Every key press is read raw, matched against a note table, and turned into sound through RARS's built-in MIDI syscall — no audio library, no abstraction layer underneath.</p>
+      <br>
+      <p>The interesting part isn't the piano itself — it's that something as fluid as music has to be expressed entirely through <strong>branches, lookups, and register juggling</strong>. Thirteen notes from C5 to C6, a 42-note melody played from two parallel arrays, and a four-key Easter egg tracked by a tiny hand-rolled state machine.</p>
+    </div>
+    <div class="stats-grid reveal">
+      <div class="stat-card"><div class="stat-num">13</div><div class="stat-label">Notes mapped, C5 → C6</div></div>
+      <div class="stat-card"><div class="stat-num">42</div><div class="stat-label">Notes in the Twinkle melody</div></div>
+      <div class="stat-card"><div class="stat-num">31</div><div class="stat-label">RARS sound syscall number</div></div>
+      <div class="stat-card"><div class="stat-num">4</div><div class="stat-label">Key states for the Easter egg</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="sound">
+  <div class="section-label">02 — How the Sound Happens</div>
+  <div class="about-text reveal" style="margin-bottom:2.5rem;max-width:640px;">
+    <p>RARS exposes a single syscall for audio — load four registers and call it. No instrument files, no buffers, just a number for pitch, a number for how long, and a number for how loud.</p>
+  </div>
+  <table class="reg-table reveal">
+    <tr><th>Register</th><th>Value</th><th>Meaning</th></tr>
+    <tr><td class="reg">a7</td><td class="val">31</td><td class="desc">Sound system call</td></tr>
+    <tr><td class="reg">a0</td><td class="val">72–84</td><td class="desc">MIDI note number (C5 to C6)</td></tr>
+    <tr><td class="reg">a1</td><td class="val">ms</td><td class="desc">Duration the note plays for</td></tr>
+    <tr><td class="reg">a2</td><td class="val">0</td><td class="desc">Instrument — piano</td></tr>
+    <tr><td class="reg">a3</td><td class="val">0–127</td><td class="desc">Volume / velocity</td></tr>
+  </table>
+</section>
+
+<section id="flow">
+  <div class="section-label">03 — Program Flow</div>
+
+  <div class="flow-sub-label">Main input loop</div>
+  <ol class="flow-list reveal">
+    <li><span>Print the key map, then block on <strong>syscall 12</strong> to read one character.</span></li>
+    <li><span>Compare it against <strong>'q'</strong> (quit) and <strong>'m'</strong> (play Twinkle) first.</span></li>
+    <li><span>Run it through the Easter-egg state check (more on that below).</span></li>
+    <li><span>Chain-compare it against the 13 piano keys with <strong>beq</strong>, falling through to an invalid-key message if nothing matches.</span></li>
+    <li><span>On a match, set the note index and jump into <strong>play_note</strong>.</span></li>
+    <li><span>Walk <strong>note_names</strong> to print the note, look up its MIDI value in <strong>notes</strong>, fire the sound syscall, and loop back to step 1.</span></li>
+  </ol>
+
+  <div class="flow-sub-label">Melody playback</div>
+  <ol class="flow-list reveal">
+    <li><span>Point two registers at <strong>twinkle_notes</strong> and <strong>twinkle_durs</strong> in parallel.</span></li>
+    <li><span>For each of the <strong>42</strong> entries: load the note and duration, fire the syscall, then call the delay subroutine.</span></li>
+    <li><span>Advance both pointers by 4 bytes and repeat until the counter hits 42.</span></li>
+    <li><span>Fall back into the main input loop.</span></li>
+  </ol>
+</section>
+
+<section id="code">
+  <div class="section-label">04 — Code Highlights</div>
+
+  <div class="code-block reveal">
+    <div class="code-block-label">Looking up and playing a note</div>
+    <pre><span class="mn">la</span> t2, notes
+<span class="mn">slli</span> t3, t1, 2          <span class="cm"># index * 4 bytes</span>
+<span class="mn">add</span>  t2, t2, t3
+<span class="mn">lw</span>   a0, 0(t2)         <span class="cm"># MIDI note number</span>
+<span class="mn">li</span>   a1, 1000          <span class="cm"># duration, ms</span>
+<span class="mn">li</span>   a2, 0             <span class="cm"># instrument: piano</span>
+<span class="mn">li</span>   a3, 127           <span class="cm"># volume</span>
+<span class="mn">li</span>   a7, 31            <span class="cm"># sound syscall</span>
+<span class="mn">ecall</span></pre>
+  </div>
+
+  <div class="code-block reveal">
+    <div class="code-block-label">Busy-wait delay between notes</div>
+    <pre>delay:
+    <span class="mn">li</span>   t4, 150000
+delay_loop:
+    <span class="mn">addi</span> t4, t4, -1
+    <span class="mn">bnez</span> t4, delay_loop
+    <span class="mn">ret</span></pre>
+  </div>
+
+  <div class="egg-box reveal">
+    <div class="egg-tag">Easter egg</div>
+    <p style="color:var(--muted);font-size:.9rem;line-height:1.7;margin-bottom:1.2rem;">Type <strong style="color:var(--text);">r → i → c → k</strong> in that order and the program quietly switches melodies. Register <strong style="color:var(--text);">s7</strong> holds the current position in the sequence — any wrong key resets it back to zero.</p>
+    <pre style="font-family:'DM Mono',monospace;font-size:.78rem;line-height:1.85;color:var(--text);"><span class="mn">check_k</span>:
+    <span class="mn">li</span>   t1, 3
+    <span class="mn">beq</span>  s7, t1, play_rickroll
+    <span class="mn">j</span>    cont</pre>
+  </div>
+</section>
+
+<section id="testing">
+  <div class="section-label">05 — Debugging &amp; Test Runs</div>
+  <div class="about-text reveal" style="max-width:640px;">
+    <p>Verified by ear, mostly. Each key was checked against its expected pitch, notes were played back to back to confirm the loop doesn't drop or stall, and the melody and Easter-egg paths were both run end to end before falling back to the main loop.</p>
+  </div>
+  <div class="test-grid reveal">
+    <div class="test-item"><div class="test-num">01</div><p><strong>Pitch accuracy</strong> — each of the 13 keys plays its correct MIDI note.</p></div>
+    <div class="test-item"><div class="test-num">02</div><p><strong>Sequencing</strong> — multiple notes and melodies play cleanly back to back.</p></div>
+    <div class="test-item"><div class="test-num">03</div><p><strong>Clean exit</strong> — 'q' terminates the program via syscall 10 every time.</p></div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-credits">
+    <strong>Piano Sound Generation via RISC-V</strong><br>
+    Elias Abuamer · Mohammed Almoldy · Fares Etweabi<br>
+    EC351, Instructor: Dr. Nur Eddein Ahmed, University of Tripoli
+  </div>
+  <a href="/#projects" class="footer-back">← Back to FaresHere</a>
+</footer>
+
+<script>
+const cursor=document.getElementById('cursor');
+document.addEventListener('mousemove',e=>{cursor.style.left=e.clientX+'px';cursor.style.top=e.clientY+'px';});
+document.querySelectorAll('a,button,.stat-card,.pw-key,.pb-key,.test-item').forEach(el=>{
+  el.addEventListener('mouseenter',()=>cursor.classList.add('expand'));
+  el.addEventListener('mouseleave',()=>cursor.classList.remove('expand'));
+});
+const observer=new IntersectionObserver(entries=>{
+  entries.forEach(e=>{if(e.isIntersecting)e.target.classList.add('visible');});
+},{threshold:.15});
+document.querySelectorAll('.reveal').forEach(el=>observer.observe(el));
+
+// --- Piano: a small Web Audio synth standing in for the RARS sound syscall ---
+let audioCtx;
+function ensureAudio(){
+  if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state==='suspended') audioCtx.resume();
+  return audioCtx;
+}
+function midiToFreq(m){ return 440*Math.pow(2,(m-69)/12); }
+function playNote(midi){
+  const ctx=ensureAudio();
+  const now=ctx.currentTime;
+  const osc=ctx.createOscillator();
+  const gain=ctx.createGain();
+  osc.type='triangle';
+  osc.frequency.setValueAtTime(midiToFreq(midi),now);
+  gain.gain.setValueAtTime(0.0001,now);
+  gain.gain.exponentialRampToValueAtTime(0.28,now+0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001,now+0.55);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(now);
+  osc.stop(now+0.6);
+}
+function flashKey(el){
+  if(!el) return;
+  el.classList.add('key-active');
+  setTimeout(()=>el.classList.remove('key-active'),140);
+}
+document.querySelectorAll('.pw-key,.pb-key').forEach(el=>{
+  el.addEventListener('click',()=>{ playNote(+el.dataset.midi); flashKey(el); });
+});
+window.addEventListener('keydown',e=>{
+  if(e.repeat) return;
+  const k=e.key.toLowerCase();
+  const el=document.querySelector(`.pw-key[data-letter="${k}"],.pb-key[data-letter="${k}"]`);
+  if(el){ playNote(+el.dataset.midi); flashKey(el); }
+});
+</script>
+</body>
+</html>
